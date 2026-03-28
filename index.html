@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Android Manifest Viewer</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a;
+    --text: #e2e8f0; --dim: #64748b; --accent: #38bdf8;
+    --danger: #f87171; --warn: #fbbf24; --ok: #4ade80;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 1.2rem; font-weight: 600; }
+  header span { color: var(--dim); font-size: 0.85rem; }
+  .drop-zone { border: 2px dashed var(--border); border-radius: 12px; padding: 48px; text-align: center; margin: 32px auto; max-width: 600px; cursor: pointer; transition: border-color .2s, background .2s; }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: var(--accent); background: rgba(56,189,248,.05); }
+  .drop-zone h2 { font-size: 1.1rem; margin-bottom: 8px; }
+  .drop-zone p  { color: var(--dim); font-size: 0.9rem; }
+  .drop-zone input { display: none; }
+  main { max-width: 960px; margin: 0 auto; padding: 0 24px 48px; }
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 20px; overflow: hidden; }
+  section h3 { padding: 14px 18px; font-size: 0.95rem; font-weight: 600; border-bottom: 1px solid var(--border); background: rgba(255,255,255,.02); display: flex; align-items: center; gap: 8px; }
+  .badge { background: var(--accent); color: #000; border-radius: 99px; padding: 1px 8px; font-size: 0.75rem; font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+  td, th { padding: 9px 18px; text-align: left; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  th { color: var(--dim); font-weight: 500; font-size: 0.8rem; text-transform: uppercase; letter-spacing: .05em; }
+  .tag-danger { color: var(--danger); font-weight: 600; }
+  .tag-normal { color: var(--ok); }
+  .tag-signature { color: var(--warn); }
+  .exported { color: var(--warn); font-size: 0.8rem; }
+  .pkg-info { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; }
+  .pkg-info div { padding: 12px 18px; }
+  .pkg-info label { color: var(--dim); font-size: 0.8rem; display: block; margin-bottom: 2px; }
+  .pkg-info span  { font-size: 0.95rem; word-break: break-all; }
+  #error { color: var(--danger); padding: 16px 24px; display: none; }
+</style>
+</head>
+<body>
+<header>
+  <span style="font-size:1.4rem">📋</span>
+  <h1>Android Manifest Viewer</h1>
+  <span>— drag & drop any APK or AndroidManifest.xml</span>
+</header>
+<main>
+  <div class="drop-zone" id="dropZone">
+    <h2>📂 Drop APK or AndroidManifest.xml here</h2>
+    <p>Or click to select a file — everything stays in your browser</p>
+    <input type="file" id="fileInput" accept=".apk,.xml">
+  </div>
+  <div id="error"></div>
+  <div id="output" style="display:none"></div>
+</main>
+
+<script>
+// ── Drag & Drop ──────────────────────────────────────────────────
+const drop = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('drag-over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('drag-over'));
+drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('drag-over'); handleFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', e => handleFile(e.target.files[0]));
+
+async function handleFile(file) {
+  if (!file) return;
+  const out = document.getElementById('output');
+  const err = document.getElementById('error');
+  err.style.display = 'none'; out.style.display = 'none'; out.innerHTML = '';
+
+  if (file.name.endsWith('.xml')) {
+    const text = await file.text();
+    renderManifest(text);
+  } else if (file.name.endsWith('.apk')) {
+    // APK is a ZIP — extract AndroidManifest.xml using JSZip if available
+    // Fallback: tell user to extract manually
+    try {
+      const { default: JSZip } = await import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm');
+      const zip = await JSZip.loadAsync(file);
+      const entry = zip.file('AndroidManifest.xml');
+      if (!entry) { showError('AndroidManifest.xml not found in APK'); return; }
+      const buf = await entry.async('uint8array');
+      // APK manifests are binary XML (AXML) — decode basic structure
+      renderBinaryManifest(buf, file.name);
+    } catch(e) {
+      showError('APK binary manifest parsing requires extraction. Please run:\n  apktool d app.apk && open app/AndroidManifest.xml\nOr drag in the decoded XML directly.');
+    }
+  } else {
+    showError('Unsupported file type. Drop an .apk or decoded AndroidManifest.xml');
+  }
+}
+
+function showError(msg) {
+  const err = document.getElementById('error');
+  err.textContent = '⚠️ ' + msg; err.style.display = 'block';
+}
+
+function renderManifest(xml) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xml, 'application/xml');
+  if (doc.querySelector('parsererror')) { showError('Could not parse XML — is this a decoded manifest?'); return; }
+
+  const manifest = doc.querySelector('manifest');
+  const pkg = manifest?.getAttribute('package') || '?';
+  const versionCode = manifest?.getAttribute('android:versionCode') || manifest?.getAttributeNS('http://schemas.android.com/apk/res/android','versionCode') || '?';
+  const versionName = manifest?.getAttribute('android:versionName') || manifest?.getAttributeNS('http://schemas.android.com/apk/res/android','versionName') || '?';
+
+  const permissions = [...doc.querySelectorAll('uses-permission')].map(el =>
+    el.getAttribute('android:name') || el.getAttribute('name') || ''
+  ).filter(Boolean);
+
+  const activities = [...doc.querySelectorAll('activity')];
+  const services   = [...doc.querySelectorAll('service')];
+  const receivers  = [...doc.querySelectorAll('receiver')];
+  const providers  = [...doc.querySelectorAll('provider')];
+
+  const DANGER = ['READ_SMS','RECORD_AUDIO','ACCESS_FINE_LOCATION','ACCESS_BACKGROUND_LOCATION',
+    'READ_CONTACTS','READ_CALL_LOG','CAMERA','PROCESS_OUTGOING_CALLS','BODY_SENSORS'];
+  const NORMAL = ['INTERNET','VIBRATE','WAKE_LOCK','RECEIVE_BOOT_COMPLETED','FOREGROUND_SERVICE'];
+
+  function permClass(p) {
+    const short = p.split('.').pop();
+    if (DANGER.includes(short)) return 'tag-danger';
+    if (NORMAL.includes(short)) return 'tag-normal';
+    return 'tag-signature';
+  }
+  function permLabel(p) {
+    const short = p.split('.').pop();
+    if (DANGER.includes(short)) return '🔴 DANGEROUS';
+    if (NORMAL.includes(short)) return '🟢 normal';
+    return '🟡 signature';
+  }
+  function getAttr(el, name) {
+    return el.getAttribute(`android:${name}`) || el.getAttribute(name) || '';
+  }
+  function componentRows(els) {
+    return els.map(el => {
+      const name = getAttr(el,'name').replace(pkg,'.');
+      const exported = getAttr(el,'exported');
+      const intentFilters = el.querySelectorAll('action');
+      const actions = [...intentFilters].map(a => getAttr(a,'name').replace('android.intent.action.','')).join(', ');
+      return `<tr><td><code>${name}</code></td><td>${exported === 'true' ? '<span class="exported">exported</span>' : ''}</td><td style="color:var(--dim);font-size:.8rem">${actions}</td></tr>`;
+    }).join('');
+  }
+
+  const html = `
+    <section>
+      <h3>📦 Package Info</h3>
+      <div class="pkg-info">
+        <div><label>Package</label><span>${pkg}</span></div>
+        <div><label>Version Name</label><span>${versionName}</span></div>
+        <div><label>Version Code</label><span>${versionCode}</span></div>
+        <div><label>Components</label><span>${activities.length} activities · ${services.length} services · ${receivers.length} receivers · ${providers.length} providers</span></div>
+      </div>
+    </section>
+    <section>
+      <h3>🔐 Permissions <span class="badge">${permissions.length}</span></h3>
+      <table><thead><tr><th>Permission</th><th>Level</th></tr></thead><tbody>
+        ${permissions.map(p => `<tr><td><code>${p}</code></td><td><span class="${permClass(p)}">${permLabel(p)}</span></td></tr>`).join('')}
+      </tbody></table>
+    </section>
+    ${activities.length ? `<section><h3>🏃 Activities <span class="badge">${activities.length}</span></h3><table><thead><tr><th>Name</th><th></th><th>Intent filters</th></tr></thead><tbody>${componentRows(activities)}</tbody></table></section>` : ''}
+    ${services.length ? `<section><h3>⚙️ Services <span class="badge">${services.length}</span></h3><table><thead><tr><th>Name</th><th></th><th>Actions</th></tr></thead><tbody>${componentRows(services)}</tbody></table></section>` : ''}
+    ${receivers.length ? `<section><h3>📡 Receivers <span class="badge">${receivers.length}</span></h3><table><thead><tr><th>Name</th><th></th><th>Actions</th></tr></thead><tbody>${componentRows(receivers)}</tbody></table></section>` : ''}
+    ${providers.length ? `<section><h3>🗄 Providers <span class="badge">${providers.length}</span></h3><table><thead><tr><th>Name</th><th></th><th></th></tr></thead><tbody>${componentRows(providers)}</tbody></table></section>` : ''}
+  `;
+
+  const out = document.getElementById('output');
+  out.innerHTML = html; out.style.display = 'block';
+  drop.style.display = 'none';
+}
+
+function renderBinaryManifest(buf, filename) {
+  showError(`${filename} contains a binary manifest. Decode it first with:\n  apktool d ${filename}\nThen drop the output AndroidManifest.xml here.`);
+}
+</script>
+</body>
+</html>
